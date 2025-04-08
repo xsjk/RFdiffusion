@@ -179,7 +179,7 @@ class Sampler:
         print('This is inf_conf.ckpt_path')
         print(self.ckpt_path)
         self.ckpt  = torch.load(
-            self.ckpt_path, map_location=self.device)
+            self.ckpt_path, map_location=self.device, weights_only=True)
 
     def assemble_config_from_chk(self) -> None:
         """

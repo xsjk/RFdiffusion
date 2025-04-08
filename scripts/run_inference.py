@@ -21,6 +21,8 @@ import torch
 from omegaconf import OmegaConf
 import hydra
 import logging
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir))
 from rfdiffusion.util import writepdb_multi, writepdb
 from rfdiffusion.inference import utils as iu
 from hydra.core.hydra_config import HydraConfig
@@ -60,7 +62,7 @@ def main(conf: HydraConfig) -> None:
         indices = [-1]
         for e in existing:
             print(e)
-            m = re.match(".*_(\d+)\.pdb$", e)
+            m = re.match(r".*_(\d+)\.pdb$", e)
             print(m)
             if not m:
                 continue
