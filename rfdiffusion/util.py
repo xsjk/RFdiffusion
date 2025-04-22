@@ -1,7 +1,154 @@
+import numpy as np
 import scipy.sparse
 
 from rfdiffusion.chemical import *
 from rfdiffusion.scoring import *
+
+
+def torch_interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """One-dimensional linear interpolation between monotonically increasing sample
+    points, with extrapolation beyond sample points.
+
+    Returns the one-dimensional piecewise linear interpolant to a function with
+    given discrete data points :math:`(xp, fp)`, evaluated at :math:`x`.
+
+    Args:
+        x: The :math:`x`-coordinates at which to evaluate the interpolated
+            values.
+        xp: The :math:`x`-coordinates of the data points, must be increasing.
+        fp: The :math:`y`-coordinates of the data points, same shape as `xp`.
+        dim: Dimension across which to interpolate.
+
+    Returns:
+        The interpolated values, same size as `x`.
+    """
+    # Move the interpolation dimension to the last axis
+    x = x.movedim(dim, -1)
+    xp = xp.movedim(dim, -1)
+    fp = fp.movedim(dim, -1)
+
+    m = torch.diff(fp) / torch.diff(xp)  # slope
+    b = fp[..., :-1] - m * xp[..., :-1]  # offset
+    indices = torch.searchsorted(xp, x, right=False)
+
+    indices = torch.clamp(indices - 1, 0, m.shape[-1] - 1)
+
+    values = m.gather(-1, indices) * x + b.gather(-1, indices)
+
+    return values.movedim(-1, dim)
+
+
+def torch_rotvec_to_matrix(rotvec: torch.Tensor) -> torch.Tensor:
+    """
+    Convert rotation vector(s) to rotation matrix/matrices (fully vectorized PyTorch implementation)
+
+    Args:
+        rotvec: Rotation vector(s), shape (..., 3)
+               Direction represents rotation axis, magnitude represents angle in radians
+
+    Returns:
+        3x3 rotation matrix or array of rotation matrices (shape (..., 3, 3))
+    """
+    input_shape = rotvec.shape
+    dtype = rotvec.dtype
+    device = rotvec.device
+
+    rotvec = rotvec.reshape(-1, 3)  # flatten all but last dimension
+    n_rot = rotvec.shape[0]
+
+    angles = torch.linalg.norm(rotvec, axis=-1, keepdims=True)
+
+    small_angle = angles < 1e-6
+    axes = rotvec / angles
+
+    K = torch.zeros((n_rot, 3, 3), device=rotvec.device, dtype=dtype)
+    K[:, 0, 1] = -axes[:, 2]  # -z
+    K[:, 0, 2] = axes[:, 1]  # y
+    K[:, 1, 0] = axes[:, 2]  # z
+    K[:, 1, 2] = -axes[:, 0]  # -x
+    K[:, 2, 0] = -axes[:, 1]  # -y
+    K[:, 2, 1] = axes[:, 0]  # x
+
+    K_squared = torch.einsum("...ij,...jk->...ik", K, K)
+
+    sin_theta = torch.sin(angles)[:, :, None]  # (n,1,1)
+    cos_theta = torch.cos(angles)[:, :, None]  # (n,1,1)
+
+    eye = torch.broadcast_to(torch.eye(3, device=device, dtype=dtype), (n_rot, 3, 3))
+    matrices = eye + sin_theta * K + (1 - cos_theta) * K_squared
+
+    matrices[small_angle[:, 0]] = torch.eye(3, device=device, dtype=dtype)[None, :, :]
+
+    return matrices.reshape(input_shape[:-1] + (3, 3))
+
+
+def torch_matrix_to_rotvec(matrix: torch.Tensor) -> torch.Tensor:
+    """
+    Convert rotation matrix/matrices back to rotation vector(s)
+
+    Args:
+        matrix: Rotation matrix/matrices, shape (3, 3) or (n, 3, 3)
+               Must be valid rotation matrices (orthonormal with det=1)
+
+    Returns:
+        Rotation vector(s), shape (3,) or (n, 3)
+    """
+    input_shape = matrix.shape
+    device = matrix.device
+    dtype = matrix.dtype
+
+    # Make input 3D (n, 3, 3)
+    matrix = matrix.reshape(-1, 3, 3)
+    n_rot = matrix.shape[0]
+
+    # Compute rotation angles
+    trace = matrix[:, 0, 0] + matrix[:, 1, 1] + matrix[:, 2, 2]
+    # Clamp to [-1, 1] to handle numerical errors
+    cos_theta = torch.clamp((trace - 1) / 2, -1, 1)
+    theta = torch.acos(cos_theta)
+
+    # Preallocate output
+    rotvec = torch.zeros((n_rot, 3), dtype=dtype, device=device)
+
+    # Case 1: theta is not close to 0 or pi
+    normal_case = (theta > 1e-6) & (theta < np.pi - 1e-6)
+    if torch.any(normal_case):
+        # Compute rotation axis for normal cases
+        axis = torch.stack([matrix[normal_case, 2, 1] - matrix[normal_case, 1, 2], matrix[normal_case, 0, 2] - matrix[normal_case, 2, 0], matrix[normal_case, 1, 0] - matrix[normal_case, 0, 1]], dim=1)
+        axis = axis / (2 * torch.sin(theta[normal_case]).unsqueeze(1))
+        rotvec[normal_case] = theta[normal_case].unsqueeze(1) * axis
+
+    # Case 2: theta is close to 0 (no rotation)
+    zero_case = theta <= 1e-6
+    if torch.any(zero_case):
+        # Rotation vector is zero
+        rotvec[zero_case] = 0.0
+
+    # Case 3: theta is close to pi (special handling)
+    pi_case = theta >= np.pi - 1e-6
+    if torch.any(pi_case):
+        # For each pi case matrix, compute possible axes
+        for i in torch.where(pi_case)[0]:
+            R = matrix[i]
+            # Compute possible axes from diagonal elements
+            possible_axes = torch.stack([torch.sqrt((R[0, 0] + 1) / 2), torch.sqrt((R[1, 1] + 1) / 2), torch.sqrt((R[2, 2] + 1) / 2)])
+
+            # Determine signs from off-diagonal elements
+            signs = torch.stack([torch.sign(R[2, 1] - R[1, 2]), torch.sign(R[0, 2] - R[2, 0]), torch.sign(R[1, 0] - R[0, 1])])
+
+            # Choose the axis with largest magnitude
+            max_idx = torch.argmax(possible_axes)
+            axis = torch.zeros(3, dtype=dtype, device=device)
+            axis[max_idx] = possible_axes[max_idx] * signs[max_idx]
+
+            # Fill other components
+            other_idxs = [j for j in range(3) if j != max_idx]
+            for j in other_idxs:
+                axis[j] = (R[max_idx, j] + R[j, max_idx]) / (2 * axis[max_idx])
+
+            rotvec[i] = theta[i] * axis
+
+    return rotvec.reshape(input_shape[:-2] + (3,))
 
 
 def generate_Cbeta(N, Ca, C):
@@ -696,3 +843,10 @@ def calc_rmsd(xyz1, xyz2, eps=1e-6):
     rmsd = np.sqrt(np.sum((xyz2_ - xyz1) * (xyz2_ - xyz1), axis=(0, 1)) / L + eps)
 
     return rmsd, U
+
+
+if __name__ == "__main__":
+    a = torch.rand((10000, 3), device="cuda")
+    v = torch_rotvec_to_matrix(a)
+    m = torch_matrix_to_rotvec(v)
+    assert torch.allclose(a, m, atol=1e-6)

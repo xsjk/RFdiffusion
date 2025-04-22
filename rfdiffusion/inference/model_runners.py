@@ -21,10 +21,10 @@ from rfdiffusion.RoseTTAFoldModel import RoseTTAFoldModule
 from rfdiffusion.util_module import ComputeAllAtomCoords
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-
-TOR_INDICES = util.torsion_indices
-TOR_CAN_FLIP = util.torsion_can_flip
-REF_ANGLES = util.reference_angles
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+TOR_INDICES = util.torsion_indices.to(DEVICE)
+TOR_CAN_FLIP = util.torsion_can_flip.to(DEVICE)
+REF_ANGLES = util.reference_angles.to(DEVICE)
 
 
 class Sampler:
@@ -104,7 +104,9 @@ class Sampler:
             self.load_checkpoint()
             self.assemble_config_from_chk()
             # Now actually load the model weights into RF
+            print("Loading model weights into RF")
             self.model = self.load_model()
+            print("Model loaded")
         else:
             self.assemble_config_from_chk()
 
@@ -425,7 +427,6 @@ class Sampler:
             t2d (1, L, L, 45)
                 - last plane is block adjacency
         """
-
         L = seq.shape[0]
         T = self.T
         binderlen = self.binderlen
@@ -434,7 +435,7 @@ class Sampler:
         ##################
         ### msa_masked ###
         ##################
-        msa_masked = torch.zeros((1, 1, L, 48))
+        msa_masked = torch.zeros((1, 1, L, 48), device=self.device)
         msa_masked[:, :, :, :22] = seq[None, None]
         msa_masked[:, :, :, 22:44] = seq[None, None]
         msa_masked[:, :, 0, 46] = 1.0
@@ -443,7 +444,7 @@ class Sampler:
         ################
         ### msa_full ###
         ################
-        msa_full = torch.zeros((1, 1, L, 25))
+        msa_full = torch.zeros((1, 1, L, 25), device=self.device)
         msa_full[:, :, :, :22] = seq[None, None]
         msa_full[:, :, 0, 23] = 1.0
         msa_full[:, :, -1, 24] = 1.0
@@ -453,7 +454,7 @@ class Sampler:
         ###########
 
         # Here we need to go from one hot with 22 classes to one hot with 21 classes (last plane is missing token)
-        t1d = torch.zeros((1, 1, L, 21))
+        t1d = torch.zeros((1, 1, L, 21), device=self.device, dtype=torch.float32)
 
         seqt1d = torch.clone(seq)
         for idx in range(L):
@@ -464,23 +465,23 @@ class Sampler:
         t1d[:, :, :, :21] = seqt1d[None, None, :, :21]
 
         # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
-        timefeature = torch.zeros((L)).float()
+        timefeature = torch.zeros((L), device=self.device, dtype=torch.float32)
         timefeature[self.mask_str.squeeze()] = 1
         timefeature[~self.mask_str.squeeze()] = 1 - t / self.T
         timefeature = timefeature[None, None, ..., None]
 
-        t1d = torch.cat((t1d, timefeature), dim=-1).float()
+        t1d = torch.cat((t1d, timefeature), dim=-1)
 
         #############
         ### xyz_t ###
         #############
         if self.preprocess_conf.sidechain_input:
-            xyz_t[torch.where(seq == 21, True, False), 3:, :] = float("nan")
+            xyz_t[torch.where(seq == 21, True, False), 3:, :] = np.nan
         else:
-            xyz_t[~self.mask_str.squeeze(), 3:, :] = float("nan")
+            xyz_t[~self.mask_str.squeeze(), 3:, :] = np.nan
 
         xyz_t = xyz_t[None, None]
-        xyz_t = torch.cat((xyz_t, torch.full((1, 1, L, 13, 3), float("nan"))), dim=3)
+        xyz_t = torch.cat((xyz_t, torch.full((1, 1, L, 13, 3), np.nan, device=self.device)), dim=3)
 
         ###########
         ### t2d ###
@@ -490,28 +491,24 @@ class Sampler:
         ###########
         ### idx ###
         ###########
-        idx = torch.tensor(self.contig_map.rf)[None]
+        idx = torch.tensor(self.contig_map.rf, device=self.device)[None]
 
         ###############
         ### alpha_t ###
         ###############
         seq_tmp = t1d[..., :-1].argmax(dim=-1).reshape(-1, L)
-        alpha, _, alpha_mask, _ = util.get_torsions(xyz_t.reshape(-1, L, 27, 3), seq_tmp, TOR_INDICES, TOR_CAN_FLIP, REF_ANGLES)
+        alpha, _, alpha_mask, _ = util.get_torsions(
+            xyz_t.reshape(-1, L, 27, 3),
+            seq_tmp,
+            TOR_INDICES,
+            TOR_CAN_FLIP,
+            REF_ANGLES,
+        )
         alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[..., 0]))
         alpha[torch.isnan(alpha)] = 0.0
         alpha = alpha.reshape(1, -1, L, 10, 2)
         alpha_mask = alpha_mask.reshape(1, -1, L, 10, 1)
         alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, L, 30)
-
-        # put tensors on device
-        msa_masked = msa_masked.to(self.device)
-        msa_full = msa_full.to(self.device)
-        seq = seq.to(self.device)
-        xyz_t = xyz_t.to(self.device)
-        idx = idx.to(self.device)
-        t1d = t1d.to(self.device)
-        t2d = t2d.to(self.device)
-        alpha_t = alpha_t.to(self.device)
 
         ######################
         ### added_features ###
@@ -637,7 +634,21 @@ class SelfConditioning(Sampler):
 
         with torch.no_grad():
             msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
-                msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d=t1d, t2d=t2d, xyz_t=xyz_t, alpha_t=alpha_t, msa_prev=None, pair_prev=None, state_prev=None, t=torch.tensor(t), return_infer=True, motif_mask=self.diffusion_mask.squeeze().to(self.device)
+                msa_masked,
+                msa_full,
+                seq_in,
+                xt_in,
+                idx_pdb,
+                t1d=t1d,
+                t2d=t2d,
+                xyz_t=xyz_t,
+                alpha_t=alpha_t,
+                msa_prev=None,
+                pair_prev=None,
+                state_prev=None,
+                t=torch.tensor(t),
+                return_infer=True,
+                motif_mask=self.diffusion_mask.squeeze().to(self.device),
             )
 
             if self.symmetry is not None and self.inf_conf.symmetric_self_cond:
@@ -655,7 +666,14 @@ class SelfConditioning(Sampler):
 
         seq_t_1 = torch.clone(seq_init)
         if t > final_step:
-            x_t_1, px0 = self.denoiser.get_next_pose(xt=x_t, px0=px0, t=t, diffusion_mask=self.mask_str.squeeze(), align_motif=self.inf_conf.align_motif, include_motif_sidechains=self.preprocess_conf.motif_sidechain_input)
+            x_t_1, px0 = self.denoiser.get_next_pose(
+                xt=x_t,
+                px0=px0,
+                t=t,
+                diffusion_mask=self.mask_str.squeeze(),
+                align_motif=self.inf_conf.align_motif,
+                include_motif_sidechains=self.preprocess_conf.motif_sidechain_input,
+            )
             self._log.info(f"Timestep {t}, input to next step: {seq2chars(torch.argmax(seq_t_1, dim=-1).tolist())}")
         else:
             x_t_1 = torch.clone(px0).to(x_t.device)
