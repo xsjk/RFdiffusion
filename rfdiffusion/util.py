@@ -1,4 +1,5 @@
 import scipy.sparse
+
 from rfdiffusion.chemical import *
 from rfdiffusion.scoring import *
 
@@ -9,7 +10,7 @@ def generate_Cbeta(N, Ca, C):
     c = C - Ca
     a = torch.cross(b, c, dim=-1)
     # These are the values used during training
-    Cb = -0.58273431*a + 0.56802827*b - 0.54067466*c + Ca
+    Cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + Ca
     # fd: below matches sidechain generator (=Rosetta params)
     # Cb = -0.57910144 * a + 0.5689693 * b - 0.5441217 * c + Ca
 
@@ -67,17 +68,14 @@ def rigid_from_3_points(N, Ca, C, non_ideal=False, eps=1e-8):
     u2 = v2 - (torch.einsum("bli, bli -> bl", e1, v2)[..., None] * e1)
     e2 = u2 / (torch.norm(u2, dim=-1, keepdim=True) + eps)
     e3 = torch.cross(e1, e2, dim=-1)
-    R = torch.cat(
-        [e1[..., None], e2[..., None], e3[..., None]], axis=-1
-    )  # [B,L,3,3] - rotation matrix
+    R = torch.cat([e1[..., None], e2[..., None], e3[..., None]], axis=-1)  # [B,L,3,3] - rotation matrix
 
     if non_ideal:
         v2 = v2 / (torch.norm(v2, dim=-1, keepdim=True) + eps)
         cosref = torch.sum(e1 * v2, dim=-1)  # cosine of current N-CA-C bond angle
         costgt = cos_ideal_NCAC.item()
         cos2del = torch.clamp(
-            cosref * costgt
-            + torch.sqrt((1 - cosref * cosref) * (1 - costgt * costgt) + eps),
+            cosref * costgt + torch.sqrt((1 - cosref * cosref) * (1 - costgt * costgt) + eps),
             min=-1.0,
             max=1.0,
         )
@@ -117,22 +115,14 @@ def get_tor_mask(seq, torsion_indices, mask_in=None):
         ti3 = torch.gather(mask_in, 2, torsion_indices[seq, :, 3])
         is_valid = torch.stack((ti0, ti1, ti2, ti3), dim=-2).all(dim=-1)
         tors_mask[..., 3:7] = torch.logical_and(tors_mask[..., 3:7], is_valid)
-        tors_mask[:, :, 7] = torch.logical_and(
-            tors_mask[:, :, 7], mask_in[:, :, 4]
-        )  # CB exist?
-        tors_mask[:, :, 8] = torch.logical_and(
-            tors_mask[:, :, 8], mask_in[:, :, 4]
-        )  # CB exist?
-        tors_mask[:, :, 9] = torch.logical_and(
-            tors_mask[:, :, 9], mask_in[:, :, 5]
-        )  # XG exist?
+        tors_mask[:, :, 7] = torch.logical_and(tors_mask[:, :, 7], mask_in[:, :, 4])  # CB exist?
+        tors_mask[:, :, 8] = torch.logical_and(tors_mask[:, :, 8], mask_in[:, :, 4])  # CB exist?
+        tors_mask[:, :, 9] = torch.logical_and(tors_mask[:, :, 9], mask_in[:, :, 5])  # XG exist?
 
     return tors_mask
 
 
-def get_torsions(
-    xyz_in, seq, torsion_indices, torsion_can_flip, ref_angles, mask_in=None
-):
+def get_torsions(xyz_in, seq, torsion_indices, torsion_can_flip, ref_angles, mask_in=None):
     B, L = xyz_in.shape[:2]
 
     tors_mask = get_tor_mask(seq, torsion_indices, mask_in)
@@ -155,17 +145,11 @@ def get_torsions(
     torsions[:, -1, 0, 0] = 1.0
 
     # omega
-    torsions[:, :-1, 0, :] = th_dih(
-        xyz[:, :-1, 1, :], xyz[:, :-1, 2, :], xyz[:, 1:, 0, :], xyz[:, 1:, 1, :]
-    )
+    torsions[:, :-1, 0, :] = th_dih(xyz[:, :-1, 1, :], xyz[:, :-1, 2, :], xyz[:, 1:, 0, :], xyz[:, 1:, 1, :])
     # phi
-    torsions[:, 1:, 1, :] = th_dih(
-        xyz[:, :-1, 2, :], xyz[:, 1:, 0, :], xyz[:, 1:, 1, :], xyz[:, 1:, 2, :]
-    )
+    torsions[:, 1:, 1, :] = th_dih(xyz[:, :-1, 2, :], xyz[:, 1:, 0, :], xyz[:, 1:, 1, :], xyz[:, 1:, 2, :])
     # psi
-    torsions[:, :, 2, :] = -1 * th_dih(
-        xyz[:, :, 0, :], xyz[:, :, 1, :], xyz[:, :, 2, :], xyz[:, :, 3, :]
-    )
+    torsions[:, :, 2, :] = -1 * th_dih(xyz[:, :, 0, :], xyz[:, :, 1, :], xyz[:, :, 2, :], xyz[:, :, 3, :])
 
     # chis
     ti0 = torch.gather(xyz, 2, torsion_indices[seq, :, 0, None].repeat(1, 1, 1, 3))
@@ -188,12 +172,7 @@ def get_torsions(
     # CB twist
     NCCA = NC - CA
     NCp = xyz[:, :, 2, :3] - xyz[:, :, 0, :3]
-    NCpp = (
-        NCp
-        - torch.sum(NCp * NCCA, dim=-1, keepdim=True)
-        / torch.sum(NCCA * NCCA, dim=-1, keepdim=True)
-        * NCCA
-    )
+    NCpp = NCp - torch.sum(NCp * NCCA, dim=-1, keepdim=True) / torch.sum(NCCA * NCCA, dim=-1, keepdim=True) * NCCA
     t = th_ang_v(CB - CA, NCpp)
     t0 = ref_angles[seq][..., 1, :]
     torsions[:, :, 8, :] = torch.stack(
@@ -225,9 +204,7 @@ def get_torsions(
 def get_tips(xyz, seq):
     B, L = xyz.shape[:2]
 
-    xyz_tips = torch.gather(
-        xyz, 2, tip_indices.to(xyz.device)[seq][:, :, None, None].expand(-1, -1, -1, 3)
-    ).reshape(B, L, 3)
+    xyz_tips = torch.gather(xyz, 2, tip_indices.to(xyz.device)[seq][:, :, None, None].expand(-1, -1, -1, 3)).reshape(B, L, 3)
     mask = ~(torch.isnan(xyz_tips[:, :, 0]))
     if torch.isnan(xyz_tips).any():  # replace NaN tip atom with virtual Cb atom
         # three anchor atoms
@@ -269,9 +246,7 @@ def cross_product_matrix(u):
 
 
 # writepdb
-def writepdb(
-    filename, atoms, seq, binderlen=None, idx_pdb=None, bfacts=None, chain_idx=None
-):
+def writepdb(filename, atoms, seq, binderlen=None, idx_pdb=None, bfacts=None, chain_idx=None):
     f = open(filename, "w")
     ctr = 1
     scpu = seq.cpu().squeeze()
@@ -357,10 +332,7 @@ def writepdb(
                 assert False
             atms = aa2long[s]
             # his prot hack
-            if (
-                s == 8
-                and torch.linalg.norm(atomscpu[i, 9, :] - atomscpu[i, 5, :]) < 1.7
-            ):
+            if s == 8 and torch.linalg.norm(atomscpu[i, 9, :] - atomscpu[i, 5, :]) < 1.7:
                 atms = (
                     " N  ",
                     " CA ",
@@ -392,9 +364,7 @@ def writepdb(
                 )  # his_d
 
             for j, atm_j in enumerate(atms):
-                if (
-                    j < natoms and atm_j is not None
-                ):  # and not torch.isnan(atomscpu[i,j,:]).any()):
+                if j < natoms and atm_j is not None:  # and not torch.isnan(atomscpu[i,j,:]).any()):
                     f.write(
                         "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
                         % (
@@ -463,19 +433,13 @@ for i in range(22):
 
 # LJ/LK scoring parameters
 ljlk_parameters = torch.zeros((22, 27, 5), dtype=torch.float)
-lj_correction_parameters = torch.zeros(
-    (22, 27, 4), dtype=bool
-)  # donor/acceptor/hpol/disulf
+lj_correction_parameters = torch.zeros((22, 27, 4), dtype=bool)  # donor/acceptor/hpol/disulf
 for i in range(22):
     for j, a in enumerate(aa2type[i]):
         if a is not None:
             ljlk_parameters[i, j, :] = torch.tensor(type2ljlk[a])
-            lj_correction_parameters[i, j, 0] = (type2hb[a] == HbAtom.DO) + (
-                type2hb[a] == HbAtom.DA
-            )
-            lj_correction_parameters[i, j, 1] = (type2hb[a] == HbAtom.AC) + (
-                type2hb[a] == HbAtom.DA
-            )
+            lj_correction_parameters[i, j, 0] = (type2hb[a] == HbAtom.DO) + (type2hb[a] == HbAtom.DA)
+            lj_correction_parameters[i, j, 1] = (type2hb[a] == HbAtom.AC) + (type2hb[a] == HbAtom.DA)
             lj_correction_parameters[i, j, 2] = type2hb[a] == HbAtom.HP
             lj_correction_parameters[i, j, 3] = a == "SH1" or a == "HS"
 
@@ -537,15 +501,9 @@ def acceptorBB0(A, hyb, bonds, atoms):
     return B, B0
 
 
-hbtypes = torch.full(
-    (22, 27, 3), -1, dtype=torch.long
-)  # (donortype, acceptortype, acchybtype)
-hbbaseatoms = torch.full(
-    (22, 27, 2), -1, dtype=torch.long
-)  # (B,B0) for acc; (D,-1) for don
-hbpolys = torch.zeros(
-    (HbDonType.NTYPES, HbAccType.NTYPES, 3, 15)
-)  # weight,xmin,xmax,ymin,ymax,c9,...,c0
+hbtypes = torch.full((22, 27, 3), -1, dtype=torch.long)  # (donortype, acceptortype, acchybtype)
+hbbaseatoms = torch.full((22, 27, 2), -1, dtype=torch.long)  # (B,B0) for acc; (D,-1) for don
+hbpolys = torch.zeros((HbDonType.NTYPES, HbAccType.NTYPES, 3, 15))  # weight,xmin,xmax,ymin,ymax,c9,...,c0
 
 for i in range(22):
     for j, a in enumerate(aa2type[i]):
@@ -555,9 +513,7 @@ for i in range(22):
                 hbtypes[i, j_h, 0] = type2dontype[a]
                 hbbaseatoms[i, j_h, 0] = j
         if a in type2acctype:
-            j_b, j_b0 = acceptorBB0(
-                aa2long[i][j], type2hybtype[a], aabonds[i], aa2long[i]
-            )
+            j_b, j_b0 = acceptorBB0(aa2long[i][j], type2hybtype[a], aabonds[i], aa2long[i])
             hbtypes[i, j, 1] = type2acctype[a]
             hbtypes[i, j, 2] = type2hybtype[a]
             hbbaseatoms[i, j, 0] = j_b
@@ -628,9 +584,7 @@ for i in range(22):
     for j in range(1, 4):
         if torsions[i][j] is not None:
             a2 = torsion_indices[i, j, 2]
-            if (i == 18 and j == 2) or (
-                i == 8 and j == 2
-            ):  # TYR CZ-OH & HIS CE1-HE1 a special case
+            if (i == 18 and j == 2) or (i == 8 and j == 2):  # TYR CZ-OH & HIS CE1-HE1 a special case
                 a0, a1 = torsion_indices[i, j, 0:2]
                 RTs_by_torsion[i, 3 + j, :3, :3] = make_frame(
                     xyzs_in_base_frame[i, a2, :3] - xyzs_in_base_frame[i, a1, :3],
@@ -714,6 +668,7 @@ def writepdb_multi(
 
         f.write("ENDMDL\n")
 
+
 def calc_rmsd(xyz1, xyz2, eps=1e-6):
     """
     Calculates RMSD between two sets of atoms (L, 3)
@@ -729,15 +684,15 @@ def calc_rmsd(xyz1, xyz2, eps=1e-6):
     V, S, W = np.linalg.svd(C)
 
     # get sign to ensure right-handedness
-    d = np.ones([3,3])
-    d[:,-1] = np.sign(np.linalg.det(V)*np.linalg.det(W))
+    d = np.ones([3, 3])
+    d[:, -1] = np.sign(np.linalg.det(V) * np.linalg.det(W))
 
     # Rotation matrix U
-    U = (d*V) @ W
+    U = (d * V) @ W
 
     # Rotate xyz2
     xyz2_ = xyz2 @ U
     L = xyz2_.shape[0]
-    rmsd = np.sqrt(np.sum((xyz2_-xyz1)*(xyz2_-xyz1), axis=(0,1)) / L + eps)
+    rmsd = np.sqrt(np.sum((xyz2_ - xyz1) * (xyz2_ - xyz1), axis=(0, 1)) / L + eps)
 
     return rmsd, U

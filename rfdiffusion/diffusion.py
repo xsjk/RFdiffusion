@@ -1,18 +1,16 @@
 # script for diffusion protocols
-import torch
-import pickle
-import numpy as np
-import os
 import logging
+import os
+import pickle
+import time
 
+import numpy as np
+import torch
 from scipy.spatial.transform import Rotation as scipy_R
 
-from rfdiffusion.util import rigid_from_3_points
-
-from rfdiffusion.util_module import ComputeAllAtomCoords
-
 from rfdiffusion import igso3
-import time
+from rfdiffusion.util import rigid_from_3_points
+from rfdiffusion.util_module import ComputeAllAtomCoords
 
 torch.set_printoptions(sci_mode=False)
 
@@ -41,9 +39,7 @@ def get_beta_schedule(T, b0, bT, schedule_type, schedule_params={}, inference=Fa
     alphabar_t_schedule = torch.cumprod(alpha_schedule, dim=0)
 
     if inference:
-        print(
-            f"With this beta schedule ({schedule_type} schedule, beta_0 = {round(b0, 3)}, beta_T = {round(bT,3)}), alpha_bar_T = {alphabar_t_schedule[-1]}"
-        )
+        print(f"With this beta schedule ({schedule_type} schedule, beta_0 = {round(b0, 3)}, beta_T = {round(bT, 3)}), alpha_bar_T = {alphabar_t_schedule[-1]}")
 
     return schedule, alpha_schedule, alphabar_t_schedule
 
@@ -116,15 +112,11 @@ class EuclideanDiffuser:
         cur_xyz = torch.clone(xyz)
 
         for t in range(1, self.T + 1):
-            cur_xyz, cur_T = self.apply_kernel(
-                cur_xyz, t, var_scale=var_scale, diffusion_mask=diffusion_mask
-            )
+            cur_xyz, cur_T = self.apply_kernel(cur_xyz, t, var_scale=var_scale, diffusion_mask=diffusion_mask)
             bb_stack.append(cur_xyz)
             T_stack.append(cur_T)
 
-        return torch.stack(bb_stack).transpose(0, 1), torch.stack(T_stack).transpose(
-            0, 1
-        )
+        return torch.stack(bb_stack).transpose(0, 1), torch.stack(T_stack).transpose(0, 1)
 
 
 def write_pkl(save_path: str, pkl_data):
@@ -213,14 +205,12 @@ class IGSO3:
         if self.schedule == "linear":
             cache_fname = os.path.join(
                 self.cache_dir,
-                f"T_{self.T}_omega_{self.num_omega}_min_sigma_{replace_period(self.min_sigma)}"
-                + f"_min_b_{replace_period(self.min_b)}_max_b_{replace_period(self.max_b)}_schedule_{self.schedule}.pkl",
+                f"T_{self.T}_omega_{self.num_omega}_min_sigma_{replace_period(self.min_sigma)}" + f"_min_b_{replace_period(self.min_b)}_max_b_{replace_period(self.max_b)}_schedule_{self.schedule}.pkl",
             )
         elif self.schedule == "exponential":
             cache_fname = os.path.join(
                 self.cache_dir,
-                f"T_{self.T}_omega_{self.num_omega}_min_sigma_{replace_period(self.min_sigma)}"
-                f"_max_sigma_{replace_period(self.max_sigma)}_schedule_{self.schedule}",
+                f"T_{self.T}_omega_{self.num_omega}_min_sigma_{replace_period(self.min_sigma)}_max_sigma_{replace_period(self.max_sigma)}_schedule_{self.schedule}",
             )
         else:
             raise ValueError(f"Unrecognize schedule {self.schedule}")
@@ -233,12 +223,7 @@ class IGSO3:
             igso3_vals = read_pkl(cache_fname)
         else:
             self._log.info("Calculating IGSO3.")
-            igso3_vals = igso3.calculate_igso3(
-                num_sigma=self.num_sigma,
-                min_sigma=self.min_sigma,
-                max_sigma=self.max_sigma,
-                num_omega=self.num_omega
-            )
+            igso3_vals = igso3.calculate_igso3(num_sigma=self.num_sigma, min_sigma=self.min_sigma, max_sigma=self.max_sigma, num_omega=self.num_omega)
             write_pkl(cache_fname, igso3_vals)
 
         return igso3_vals
@@ -278,11 +263,7 @@ class IGSO3:
             return 10**sigma
         elif self.schedule == "linear":  # Variance exploding analogue of Ho schedule
             # add self.min_sigma for stability
-            return (
-                self.min_sigma
-                + t * self.min_b
-                + (1 / 2) * (t**2) * (self.max_b - self.min_b)
-            )
+            return self.min_sigma + t * self.min_b + (1 / 2) * (t**2) * (self.max_b - self.min_b)
         else:
             raise ValueError(f"Unrecognize schedule {self.schedule}")
 
@@ -428,18 +409,9 @@ class IGSO3:
             sampled_rots = sampled_rots * non_diffusion_mask
 
         # Apply sampled rot.
-        R_sampled = (
-            scipy_R.from_rotvec(sampled_rots.reshape(-1, 3))
-            .as_matrix()
-            .reshape(self.T, num_res, 3, 3)
-        )
+        R_sampled = scipy_R.from_rotvec(sampled_rots.reshape(-1, 3)).as_matrix().reshape(self.T, num_res, 3, 3)
         R_perturbed = np.einsum("tnij,njk->tnik", R_sampled, R_true)
-        perturbed_crds = (
-            np.einsum(
-                "tnij,naj->tnai", R_sampled, xyz[:, :3, :] - Ca[:, None, ...].numpy()
-            )
-            + Ca[None, :, None].numpy()
-        )
+        perturbed_crds = np.einsum("tnij,naj->tnai", R_sampled, xyz[:, :3, :] - Ca[:, None, ...].numpy()) + Ca[None, :, None].numpy()
 
         if t_list != None:
             idx = [i - 1 for i in t_list]
@@ -451,9 +423,7 @@ class IGSO3:
             R_perturbed.transpose(1, 0, 2, 3),
         )
 
-    def reverse_sample_vectorized(
-        self, R_t, R_0, t, noise_level, mask=None, return_perturb=False
-    ):
+    def reverse_sample_vectorized(self, R_t, R_0, t, noise_level, mask=None, return_perturb=False):
         """reverse_sample uses an approximation to the IGSO3 score to sample
         a rotation at the previous time step.
 
@@ -496,9 +466,7 @@ class IGSO3:
         # compute rotation vector corresponding to prediction of how r_t goes to r_0
         R_0, R_t = torch.tensor(R_0), torch.tensor(R_t)
         R_0t = torch.einsum("...ij,...kj->...ik", R_t, R_0)
-        R_0t_rotvec = torch.tensor(
-            scipy_R.from_matrix(R_0t.cpu().numpy()).as_rotvec()
-        ).to(R_0.device)
+        R_0t_rotvec = torch.tensor(scipy_R.from_matrix(R_0t.cpu().numpy()).as_rotvec()).to(R_0.device)
 
         # Approximate the score based on the prediction of R0.
         # R_t @ hat(Score_approx) is the score approximation in the Lie algebra
@@ -591,9 +559,7 @@ class Diffuser:
         )
 
         # get backbone translation diffuser
-        self.eucl_diffuser = EuclideanDiffuser(
-            self.T, b_0, b_T, schedule_type=schedule_type, **schedule_kwargs
-        )
+        self.eucl_diffuser = EuclideanDiffuser(self.T, b_0, b_T, schedule_type=schedule_type, **schedule_kwargs)
 
         print("Successful diffuser __init__")
 
@@ -638,9 +604,7 @@ class Diffuser:
 
         # Centre unmasked structure at origin, as in training (to prevent information leak)
         if torch.sum(diffusion_mask) != 0:
-            self.motif_com = xyz[diffusion_mask, 1, :].mean(
-                dim=0
-            )  # This is needed for one of the potentials
+            self.motif_com = xyz[diffusion_mask, 1, :].mean(dim=0)  # This is needed for one of the potentials
             xyz = xyz - self.motif_com
         elif torch.sum(diffusion_mask) == 0:
             xyz = xyz - xyz[:, 1, :].mean(dim=0)
@@ -650,18 +614,14 @@ class Diffuser:
 
         # 1 get translations
         tick = time.time()
-        diffused_T, deltas = self.eucl_diffuser.diffuse_translations(
-            xyz[:, :3, :].clone(), diffusion_mask=diffusion_mask
-        )
+        diffused_T, deltas = self.eucl_diffuser.diffuse_translations(xyz[:, :3, :].clone(), diffusion_mask=diffusion_mask)
         # print('Time to diffuse coordinates: ',time.time()-tick)
         diffused_T /= self.crd_scale
         deltas /= self.crd_scale
 
         # 2 get frames
         tick = time.time()
-        diffused_frame_crds, diffused_frames = self.so3_diffuser.diffuse_frames(
-            xyz[:, :3, :].clone(), diffusion_mask=diffusion_mask.numpy(), t_list=None
-        )
+        diffused_frame_crds, diffused_frames = self.so3_diffuser.diffuse_frames(xyz[:, :3, :].clone(), diffusion_mask=diffusion_mask.numpy(), t_list=None)
         diffused_frame_crds /= self.crd_scale
         # print('Time to diffuse frames: ',time.time()-tick)
 
@@ -669,11 +629,7 @@ class Diffuser:
         tick = time.time()
         cum_delta = deltas.cumsum(dim=1)
         # The coordinates of the translated AND rotated frames
-        diffused_BB = (
-            torch.from_numpy(diffused_frame_crds) + cum_delta[:, :, None, :]
-        ).transpose(
-            0, 1
-        )  # [n,L,3,3]
+        diffused_BB = (torch.from_numpy(diffused_frame_crds) + cum_delta[:, :, None, :]).transpose(0, 1)  # [n,L,3,3]
         # diffused_BB  = torch.from_numpy(diffused_frame_crds).transpose(0,1)
 
         # diffused_BB is [t_steps,L,3,3]

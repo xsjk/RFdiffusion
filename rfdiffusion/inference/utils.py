@@ -1,17 +1,19 @@
-import numpy as np
+import glob
+import logging
 import os
-from omegaconf import DictConfig
+import random
+
+import numpy as np
 import torch
 import torch.nn.functional as nn
-from rfdiffusion.diffusion import get_beta_schedule
+from omegaconf import DictConfig
 from scipy.spatial.transform import Rotation as scipy_R
+
+from rfdiffusion import util
+from rfdiffusion.diffusion import get_beta_schedule
+from rfdiffusion.inference import model_runners
 from rfdiffusion.util import rigid_from_3_points
 from rfdiffusion.util_module import ComputeAllAtomCoords
-from rfdiffusion import util
-import random
-import logging
-from rfdiffusion.inference import model_runners
-import glob
 
 ###########################################################
 #### Functions which can be called outside of Denoiser ####
@@ -62,9 +64,7 @@ def get_next_frames(xt, px0, t, diffuser, so3_type, diffusion_mask, noise_scale=
     # Sample next frame for each residue
     if so3_type == "igso3":
         # don't do calculations on masked positions since they end up as identity matrix
-        all_rot_transitions[
-            ~diffusion_mask
-        ] = diffuser.so3_diffuser.reverse_sample_vectorized(
+        all_rot_transitions[~diffusion_mask] = diffuser.so3_diffuser.reverse_sample_vectorized(
             R_t[~diffusion_mask],
             R_0[~diffusion_mask],
             t,
@@ -98,24 +98,13 @@ def get_mu_xt_x0(xt, px0, t, beta_schedule, alphabar_schedule, eps=1e-6):
     """
     # sigma is predefined from beta. Often referred to as beta tilde t
     t_idx = t - 1
-    sigma = (
-        (1 - alphabar_schedule[t_idx - 1]) / (1 - alphabar_schedule[t_idx])
-    ) * beta_schedule[t_idx]
+    sigma = ((1 - alphabar_schedule[t_idx - 1]) / (1 - alphabar_schedule[t_idx])) * beta_schedule[t_idx]
 
     xt_ca = xt[:, 1, :]
     px0_ca = px0[:, 1, :]
 
-    a = (
-        (torch.sqrt(alphabar_schedule[t_idx - 1] + eps) * beta_schedule[t_idx])
-        / (1 - alphabar_schedule[t_idx])
-    ) * px0_ca
-    b = (
-        (
-            torch.sqrt(1 - beta_schedule[t_idx] + eps)
-            * (1 - alphabar_schedule[t_idx - 1])
-        )
-        / (1 - alphabar_schedule[t_idx])
-    ) * xt_ca
+    a = ((torch.sqrt(alphabar_schedule[t_idx - 1] + eps) * beta_schedule[t_idx]) / (1 - alphabar_schedule[t_idx])) * px0_ca
+    b = ((torch.sqrt(1 - beta_schedule[t_idx] + eps) * (1 - alphabar_schedule[t_idx - 1])) / (1 - alphabar_schedule[t_idx])) * xt_ca
 
     mu = a + b
 
@@ -160,9 +149,7 @@ def get_next_ca(
     xt = xt * crd_scale
 
     # get mu(xt, x0)
-    mu, sigma = get_mu_xt_x0(
-        xt, px0, t, beta_schedule=beta_schedule, alphabar_schedule=alphabar_schedule
-    )
+    mu, sigma = get_mu_xt_x0(xt, px0, t, beta_schedule=beta_schedule, alphabar_schedule=alphabar_schedule)
 
     sampled_crds = torch.normal(mu, torch.sqrt(sigma * noise_scale))
     delta = sampled_crds - xt[:, 1, :]  # check sign of this is correct
@@ -201,9 +188,7 @@ def get_noise_schedule(T, noiseT, noise1, schedule_type):
         "linear": lambda t: ((t - 1) / (T - 1)) * (noiseT - noise1) + noise1,
     }
 
-    assert (
-        schedule_type in noise_schedules
-    ), f"noise_schedule must be one of {noise_schedules.keys()}. Received noise_schedule={schedule_type}. Exiting."
+    assert schedule_type in noise_schedules, f"noise_schedule must be one of {noise_schedules.keys()}. Received noise_schedule={schedule_type}. Exiting."
 
     return noise_schedules[schedule_type]
 
@@ -269,9 +254,7 @@ class Denoise:
         self.potential_manager = potential_manager
         self._log = logging.getLogger(__name__)
 
-        self.schedule, self.alpha_schedule, self.alphabar_schedule = get_beta_schedule(
-            self.T, self.b_0, self.b_T, self.schedule_type, inference=True
-        )
+        self.schedule, self.alpha_schedule, self.alphabar_schedule = get_beta_schedule(self.T, self.b_0, self.b_T, self.schedule_type, inference=True)
 
         self.noise_schedule_ca = get_noise_schedule(
             self.T,
@@ -303,9 +286,7 @@ class Denoise:
             N = V.shape[-2]
             return np.sqrt(np.sum((V - W) * (V - W), axis=(-2, -1)) / N + eps)
 
-        assert (
-            xT.shape[1] == px0.shape[1]
-        ), f"xT has shape {xT.shape} and px0 has shape {px0.shape}"
+        assert xT.shape[1] == px0.shape[1], f"xT has shape {xT.shape} and px0 has shape {px0.shape}"
 
         L, n_atom, _ = xT.shape  # A is number of atoms
         atom_mask = ~torch.isnan(px0)
@@ -481,9 +462,7 @@ class Denoise:
         # Apply gradient step from guiding potentials
         # This can be moved to below where the full atom representation is calculated to allow for potentials involving sidechains
 
-        grad_ca = self.get_potential_gradients(
-            xt.clone(), diffusion_mask=diffusion_mask
-        )
+        grad_ca = self.get_potential_gradients(xt.clone(), diffusion_mask=diffusion_mask)
 
         ca_deltas += self.potential_manager.get_guide_scale(t) * grad_ca
 
@@ -518,25 +497,21 @@ def sampler_selector(conf: DictConfig):
 
 def parse_pdb(filename, **kwargs):
     """extract xyz coords for all heavy atoms"""
-    with open(filename,"r") as f:
-        lines=f.readlines()
+    with open(filename, "r") as f:
+        lines = f.readlines()
     return parse_pdb_lines(lines, **kwargs)
 
 
 def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
     # indices of residues observed in the structure
-    res, pdb_idx = [],[]
+    res, pdb_idx = [], []
     for l in lines:
         if l[:4] == "ATOM" and l[12:16].strip() == "CA":
             res.append((l[22:26], l[17:20]))
             # chain letter, res num
             pdb_idx.append((l[21:22].strip(), int(l[22:26].strip())))
     seq = [util.aa2num[r[1]] if r[1] in util.aa2num.keys() else 20 for r in res]
-    pdb_idx = [
-        (l[21:22].strip(), int(l[22:26].strip()))
-        for l in lines
-        if l[:4] == "ATOM" and l[12:16].strip() == "CA"
-    ]  # chain letter, res num
+    pdb_idx = [(l[21:22].strip(), int(l[22:26].strip())) for l in lines if l[:4] == "ATOM" and l[12:16].strip() == "CA"]  # chain letter, res num
 
     # 4 BB + up to 10 SC atoms
     xyz = np.full((len(res), 14, 3), np.nan, dtype=np.float32)
@@ -549,15 +524,11 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
             " " + l[12:16].strip().ljust(3),
             l[17:20],
         )
-        if (chain,resNo) in pdb_idx:
+        if (chain, resNo) in pdb_idx:
             idx = pdb_idx.index((chain, resNo))
             # for i_atm, tgtatm in enumerate(util.aa2long[util.aa2num[aa]]):
-            for i_atm, tgtatm in enumerate(
-                util.aa2long[util.aa2num[aa]][:14]
-                ):
-                if (
-                    tgtatm is not None and tgtatm.strip() == atom.strip()
-                    ):  # ignore whitespace
+            for i_atm, tgtatm in enumerate(util.aa2long[util.aa2num[aa]][:14]):
+                if tgtatm is not None and tgtatm.strip() == atom.strip():  # ignore whitespace
                     xyz[idx, i_atm, :] = [float(l[30:38]), float(l[38:46]), float(l[46:54])]
                     break
 
@@ -582,9 +553,7 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
     out = {
         "xyz": xyz,  # cartesian coordinates, [Lx14]
         "mask": mask,  # mask showing which atoms are present in the PDB file, [Lx14]
-        "idx": np.array(
-            [i[1] for i in pdb_idx]
-        ),  # residue numbers in the PDB file, [L]
+        "idx": np.array([i[1] for i in pdb_idx]),  # residue numbers in the PDB file, [L]
         "seq": np.array(seq),  # amino acid sequence, [L]
         "pdb_idx": pdb_idx,  # list of (chain letter, residue number) in the pdb file, [L]
     }
@@ -649,9 +618,7 @@ def get_idx0_hotspots(mappings, ppi_conf, binderlen):
     hotspot_idx = None
     if binderlen > 0:
         if ppi_conf.hotspot_res is not None:
-            assert all(
-                [i[0].isalpha() for i in ppi_conf.hotspot_res]
-            ), "Hotspot residues need to be provided in pdb-indexed form. E.g. A100,A103"
+            assert all([i[0].isalpha() for i in ppi_conf.hotspot_res]), "Hotspot residues need to be provided in pdb-indexed form. E.g. A100,A103"
             hotspots = [(i[0], int(i[1:])) for i in ppi_conf.hotspot_res]
             hotspot_idx = []
             for i, res in enumerate(mappings["receptor_con_ref_pdb_idx"]):
@@ -688,8 +655,8 @@ class BlockAdjacency:
              conf.scaffold_list as conf
              conf.inference.num_designs for sanity checking
         """
-       
-        self.conf=conf 
+
+        self.conf = conf
         # either list or path to .txt file with list of scaffolds
         if self.conf.scaffoldguided.scaffold_list is not None:
             if type(self.conf.scaffoldguided.scaffold_list) == list:
@@ -704,10 +671,7 @@ class BlockAdjacency:
             else:
                 raise NotImplementedError
         else:
-            self.scaffold_list = [
-                os.path.split(i)[1][:-6]
-                for i in glob.glob(f"{self.conf.scaffoldguided.scaffold_dir}/*_ss.pt")
-            ]
+            self.scaffold_list = [os.path.split(i)[1][:-6] for i in glob.glob(f"{self.conf.scaffoldguided.scaffold_dir}/*_ss.pt")]
             self.scaffold_list.sort()
 
         # path to directory with scaffolds, ss files and block_adjacency files
@@ -749,9 +713,7 @@ class BlockAdjacency:
         self.num_designs = num_designs
 
         if len(self.scaffold_list) > self.num_designs:
-            print(
-                "WARNING: Scaffold set is bigger than num_designs, so not every scaffold type will be sampled"
-            )
+            print("WARNING: Scaffold set is bigger than num_designs, so not every scaffold type will be sampled")
 
         # for tracking number of designs
         self.num_completed = 0
@@ -771,10 +733,8 @@ class BlockAdjacency:
         """
         Given at item, get the ss tensor and block adjacency matrix for that item
         """
-        ss = torch.load(os.path.join(self.scaffold_dir, f'{item.split(".")[0]}_ss.pt'))
-        adj = torch.load(
-            os.path.join(self.scaffold_dir, f'{item.split(".")[0]}_adj.pt')
-        )
+        ss = torch.load(os.path.join(self.scaffold_dir, f"{item.split('.')[0]}_ss.pt"))
+        adj = torch.load(os.path.join(self.scaffold_dir, f"{item.split('.')[0]}_adj.pt"))
 
         return ss, adj
 
@@ -820,9 +780,7 @@ class BlockAdjacency:
                 output.extend(length * [True])
             else:
                 # randomly sample insertion length
-                ins = random.randint(
-                    self.sampled_insertion[0], self.sampled_insertion[1]
-                )
+                ins = random.randint(self.sampled_insertion[0], self.sampled_insertion[1])
                 output.extend((length + ins) * [False])
         output.extend(C_add * [False])
         assert torch.sum(torch.tensor(output)) == torch.sum(~mask)
@@ -874,13 +832,13 @@ class BlockAdjacency:
         """
         Wrapper method for pulling an item from the list, and preparing ss and block adj features
         """
-        
+
         # Handle determinism. Useful for integration tests
         if self.conf.inference.deterministic:
             torch.manual_seed(self.num_completed)
             np.random.seed(self.num_completed)
             random.seed(self.num_completed)
-  
+
         if self.systematic:
             # reset if num designs > num_scaffolds
             if self.item_n >= len(self.scaffold_list):
@@ -930,12 +888,7 @@ class Target:
             self.hotspots = hotspots
         else:
             self.hotspots = []
-        self.pdb["hotspots"] = np.array(
-            [
-                True if f"{i[0]}{i[1]}" in self.hotspots else False
-                for i in self.pdb["pdb_idx"]
-            ]
-        )
+        self.pdb["hotspots"] = np.array([True if f"{i[0]}{i[1]}" in self.hotspots else False for i in self.pdb["pdb_idx"]])
 
         if conf.contig_crop:
             self.contig_crop(conf.contig_crop)
@@ -949,14 +902,7 @@ class Target:
             subcon = []
             for crop in contig.split("/"):
                 if crop[0].isalpha():
-                    subcon.extend(
-                        [
-                            (crop[0], p)
-                            for p in np.arange(
-                                int(crop.split("-")[0][1:]), int(crop.split("-")[1]) + 1
-                            )
-                        ]
-                    )
+                    subcon.extend([(crop[0], p) for p in np.arange(int(crop.split("-")[0][1:]), int(crop.split("-")[1]) + 1)])
             contig_list.append(subcon)
         return contig_list
 
@@ -983,14 +929,10 @@ class Target:
             self.pdb["idx"][start:] += residue_offset
         # flatten list
         contig_list = [i for j in contig_list for i in j]
-        mask = np.array(
-            [True if i in contig_list else False for i in self.pdb["pdb_idx"]]
-        )
+        mask = np.array([True if i in contig_list else False for i in self.pdb["pdb_idx"]])
 
         # sanity check
-        assert np.sum(self.pdb["hotspots"]) == np.sum(
-            self.pdb["hotspots"][mask]
-        ), "Supplied hotspot residues are missing from the target contig!"
+        assert np.sum(self.pdb["hotspots"]) == np.sum(self.pdb["hotspots"][mask]), "Supplied hotspot residues are missing from the target contig!"
         # crop pdb
         for key, val in self.pdb.items():
             try:
@@ -1002,14 +944,15 @@ class Target:
     def get_target(self):
         return self.pdb
 
+
 def ss_from_contig(ss_masks: dict):
-    """  
+    """
     Function for taking 1D masks for each of the ss types, and outputting a secondary structure input
     """
-    L=len(ss_masks['helix'])
-    ss=torch.zeros((L, 4)).long()
-    ss[:,3] = 1 #mask
-    for idx, mask in enumerate([ss_masks['helix'],ss_masks['strand'], ss_masks['loop']]):
-        ss[mask,idx] = 1
-        ss[mask, 3] = 0 # remove the mask token
+    L = len(ss_masks["helix"])
+    ss = torch.zeros((L, 4)).long()
+    ss[:, 3] = 1  # mask
+    for idx, mask in enumerate([ss_masks["helix"], ss_masks["strand"], ss_masks["loop"]]):
+        ss[mask, idx] = 1
+        ss[mask, 3] = 0  # remove the mask token
     return ss
